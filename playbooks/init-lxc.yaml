@@ -1,0 +1,145 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    ansible_user: "{{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
+    ansible_password: "{{ lookup('semaphore', 'ROOT-PASSWORD.password') }}"
+    user_ssh_key: "{{ lookup('semaphore', 'USER-PUBKEY.key') }}"
+    user_name: "{{ lookup('semaphore', 'USER-PUBKEY.username') }}"
+
+  tasks:
+    - name: Detect operating system
+      ansible.builtin.shell: |
+        if grep -qi ubuntu /etc/os-release; then
+          echo "Ubuntu detected."
+        elif grep -qi debian /etc/os-release; then
+          echo "Debian detected."
+        else
+          echo "Unsupported operating system. Exiting."
+          exit 1
+        fi
+      register: os_output
+      changed_when: false
+
+    - name: Create a backup of sshd_config
+      ansible.builtin.copy:
+        src: /etc/ssh/sshd_config
+        dest: /etc/ssh/sshd_config.bak
+        remote_src: yes
+
+    - name: Edit SSH configuration
+      ansible.builtin.block:
+        - name: Set PermitRootLogin to no
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'PermitRootLogin no'
+            create: yes
+
+        - name: Set PubkeyAuthentication to yes
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'PubkeyAuthentication yes'
+            create: yes
+
+        - name: Set AuthorizedKeysFile
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'AuthorizedKeysFile .ssh/authorized_keys'
+            create: yes
+
+        - name: Set PasswordAuthentication to no
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'PasswordAuthentication no'
+            create: yes
+
+        - name: Set AllowUsers
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'AllowUsers {{ user_name }}'
+            create: yes
+
+        - name: Set RSAAuthentication to yes
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'RSAAuthentication yes'
+            create: yes
+
+        - name: Set DebianBanner to no
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'DebianBanner no'
+            create: yes
+
+        - name: Set MACs
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha2-256,hmac-sha2-512'
+            create: yes
+
+        - name: Set KexAlgorithms
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'KexAlgorithms diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group-exchange-sha256,curve25519-sha256,curve25519-sha256@libssh.org'
+            create: yes
+
+        - name: Set HostKeyAlgorithms
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            state: present
+            line: 'HostKeyAlgorithms ssh-ed25519,rsa-sha2-256,rsa-sha2-512'
+            create: yes
+      notify: restart ssh
+
+    - name: Ensure necessary packages are installed
+      ansible.builtin.apt:
+        name:
+          - sudo
+          - curl
+          - unattended-upgrades
+          - rsyslog
+          - fail2ban
+          - apt-transport-https
+          - ca-certificates
+          - software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Create user (from key store)
+      ansible.builtin.user:
+        name: "{{ user_name }}"
+        state: present
+        create_home: yes
+
+    - name: Configure sudo for the user
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        state: present
+        line: '{{ user_name }} ALL=(ALL) NOPASSWD:ALL'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Deploy SSH key for the user
+      ansible.posix.authorized_key:
+        user: "{{ user_name }}"
+        state: present
+        key: "{{ user_ssh_key }}"
+
+    - name: Upgrade system
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: yes
+
+  handlers:
+    - name: restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
