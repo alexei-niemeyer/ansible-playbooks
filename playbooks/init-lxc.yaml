@@ -28,7 +28,7 @@
         remote_src: yes
 
     - name: Edit SSH configuration
-      ansible.builtin.block:
+      block:
         - name: Set PermitRootLogin to no
           ansible.builtin.lineinfile:
             path: /etc/ssh/sshd_config
