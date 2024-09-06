@@ -1,0 +1,17 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    ansible_user: "{{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
+    ansible_password: "{{ lookup('semaphore', 'ROOT-PASSWORD.password') }}"
+
+  tasks:
+    - name: Test SSH connection and ping
+      ansible.builtin.command:
+        cmd: ping -c 4 8.8.8.8
+      register: ping_result
+
+    - name: Show ping result
+      ansible.builtin.debug:
+        msg: "{{ ping_result.stdout_lines }}"
+...
