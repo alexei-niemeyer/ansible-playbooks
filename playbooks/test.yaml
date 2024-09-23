@@ -4,6 +4,8 @@
   vars:
     ansible_user: "{{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
     ansible_password: "{{ lookup('semaphore', 'ROOT-PASSWORD.password') }}"
+    user_ssh_key: "{{ lookup('semaphore', 'USER-PUBKEY.key') }}"
+    user_name: "{{ lookup('semaphore', 'USER-PUBKEY.username') }}"
 
   tasks:
     - name: Test SSH connection and ping
@@ -14,4 +16,12 @@
     - name: Show ping result
       ansible.builtin.debug:
         msg: "{{ ping_result.stdout_lines }}"
+
+    - name: Test lookup from Semaphore key store
+      debug:
+        msg:
+          - "ansible_user: {{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
+          - "user_ssh_key: {{ lookup('semaphore', 'USER-PUBKEY.key') }}"
+          - "user_name: {{ lookup('semaphore', 'USER-PUBKEY.username') }}"
+
 ...
