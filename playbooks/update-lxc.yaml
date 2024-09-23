@@ -4,8 +4,23 @@
   vars:
     ansible_user: "{{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
     ansible_password: "{{ lookup('semaphore', 'ROOT-PASSWORD.password') }}"
+    user_ssh_key: "{{ lookup('semaphore', 'USER-PUBKEY.key') }}"
+    user_name: "{{ lookup('semaphore', 'USER-PUBKEY.username') }}"
 
   tasks:
+    - name: Detect operating system
+      ansible.builtin.shell: |
+        if grep -qi ubuntu /etc/os-release; then
+          echo "Ubuntu detected."
+        elif grep -qi debian /etc/os-release; then
+          echo "Debian detected."
+        else
+          echo "Unsupported operating system. Exiting."
+          exit 1
+        fi
+      register: os_output
+      changed_when: false
+        
     - name: Upgrade system
       ansible.builtin.apt:
         upgrade: dist
