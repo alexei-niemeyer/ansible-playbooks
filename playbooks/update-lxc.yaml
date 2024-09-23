@@ -5,9 +5,6 @@
     ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
 
   tasks:
-    - name: Debug-Variablen
-      debug:
-        msg: "user_ssh_key: {{ user_ssh_key }}, user_name: {{ user_name }}"
     - name: Detect operating system
       ansible.builtin.shell: |
         if grep -qi ubuntu /etc/os-release; then
