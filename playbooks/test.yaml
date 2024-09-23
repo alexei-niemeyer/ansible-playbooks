@@ -2,7 +2,7 @@
 - hosts: all
   become: true
   vars:
-    ansible_user: alexei
+    ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
 
   tasks:
     - name: Test SSH connection and ping
@@ -13,12 +13,5 @@
     - name: Show ping result
       ansible.builtin.debug:
         msg: "{{ ping_result.stdout_lines }}"
-
-    - name: Test lookup from Semaphore key store
-      debug:
-        msg:
-          - "ansible_user: {{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
-          - "user_ssh_key: {{ lookup('semaphore', 'USER-PUBKEY.key') }}"
-          - "user_name: {{ lookup('semaphore', 'USER-PUBKEY.username') }}"
 
 ...
