@@ -1,11 +1,8 @@
 ---
 - hosts: all
-  become: yes
+  become: true
   vars:
     ansible_user: alexei
-    ansible_password: "{{ lookup('semaphore', 'ROOT-PASSWORD.password') }}"
-    user_ssh_key: "{{ lookup('semaphore', 'USER-PUBKEY.key') }}"
-    user_name: "{{ lookup('semaphore', 'USER-PUBKEY.username') }}"
 
   tasks:
     - name: Test SSH connection and ping
