@@ -2,7 +2,7 @@
 - hosts: all
   become: yes
   vars:
-    ansible_user: "{{ lookup('semaphore', 'ROOT-PASSWORD.username') }}"
+    ansible_user: alexei
     ansible_password: "{{ lookup('semaphore', 'ROOT-PASSWORD.password') }}"
     user_ssh_key: "{{ lookup('semaphore', 'USER-PUBKEY.key') }}"
     user_name: "{{ lookup('semaphore', 'USER-PUBKEY.username') }}"
