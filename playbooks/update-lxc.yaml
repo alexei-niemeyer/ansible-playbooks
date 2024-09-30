@@ -39,15 +39,4 @@
       ansible.builtin.debug:
         msg: "A total of {{ update_count.stdout }} updates were installed on {{ inventory_hostname }}."
       when: upgrade_result.changed
-
-- hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Aggregate updates across all hosts
-      debug:
-        msg: |
-          {% for host in groups['all'] %}
-            {{ host }}: {{ hostvars[host].updates_installed | default(0) }} Updates
-          {% endfor %}
-
 ...
