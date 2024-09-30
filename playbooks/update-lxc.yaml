@@ -18,9 +18,36 @@
       register: os_output
       changed_when: false
 
+    - name: Check for available updates
+      ansible.builtin.shell: |
+        LC_ALL=C apt list --upgradeable 2>/dev/null | grep -v "^Listing" | wc -l
+      register: update_count
+      changed_when: false
+
     - name: Upgrade system
       ansible.builtin.apt:
         upgrade: dist
         update_cache: yes
+      register: upgrade_result
+
+    - name: Set fact for updates installed
+      set_fact:
+        updates_installed: "{{ updates_installed | default(0) + (update_count.stdout | int) }}"
+      when: upgrade_result.changed
+
+    - name: Display number of updates installed
+      ansible.builtin.debug:
+        msg: "A total of {{ update_count.stdout }} updates were installed on {{ inventory_hostname }}."
+      when: upgrade_result.changed
+
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Aggregate updates across all hosts
+      debug:
+        msg: |
+          {% for host in groups['all'] %}
+            {{ host }}: {{ hostvars[host].updates_installed | default(0) }} Updates
+          {% endfor %}
 
 ...
