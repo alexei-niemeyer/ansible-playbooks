@@ -18,14 +18,14 @@
       register: os_output
       changed_when: false
 
-    - name: Run apt update and capture stderr
+    - name: Run apt update and capture output
       ansible.builtin.shell: apt update
       register: apt_update
       ignore_errors: yes
 
     - name: Extract missing GPG keys from apt update
       set_fact:
-        missing_keys: "{{ apt_update.stderr | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
+        missing_keys: "{{ apt_update.stdout | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
 
     - name: Import missing GPG keys
       ansible.builtin.apt_key:
