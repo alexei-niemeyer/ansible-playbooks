@@ -18,10 +18,13 @@
       register: os_output
       changed_when: false
 
-    - name: Check for available updates
+    - name: Update apt cache with retries
       ansible.builtin.shell: |
-        LC_ALL=C apt list --upgradeable 2>/dev/null | grep -v "^Listing" | wc -l
-      register: update_count
+        apt update || (grep 'NO_PUBKEY' /var/log/apt/term.log | awk '{print $21}' | xargs -r -I '{}' apt-key adv --keyserver keyserver.ubuntu.com --recv-keys '{}')
+      register: apt_update_result
+      retries: 3
+      delay: 10
+      until: apt_update_result.rc == 0
       changed_when: false
 
     - name: Upgrade system
@@ -29,14 +32,4 @@
         upgrade: dist
         update_cache: yes
       register: upgrade_result
-
-    - name: Set fact for updates installed
-      set_fact:
-        updates_installed: "{{ updates_installed | default(0) + (update_count.stdout | int) }}"
-      when: upgrade_result.changed
-
-    - name: Display number of updates installed
-      ansible.builtin.debug:
-        msg: "A total of {{ update_count.stdout }} updates were installed on {{ inventory_hostname }}."
-      when: upgrade_result.changed
 ...
