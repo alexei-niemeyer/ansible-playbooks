@@ -85,7 +85,7 @@
     - name: Fail if there are still missing GPG keys after import
       ansible.builtin.fail:
         msg: "Still missing GPG keys after import: {{ new_missing_keys }}"
-      when: new_missing_keys | length > 0
+      when: (new_missing_keys | default([])) | length > 0
 
     - name: Check for available updates
       ansible.builtin.shell: |
