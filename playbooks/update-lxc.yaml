@@ -18,13 +18,31 @@
       register: os_output
       changed_when: false
 
-    - name: Update apt cache with retries
+    - name: Run apt update and capture stderr
+      ansible.builtin.shell: apt update
+      register: apt_update
+      ignore_errors: yes
+
+    - name: Extract missing GPG keys from apt update
+      set_fact:
+        missing_keys: "{{ apt_update.stderr | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
+
+    - name: Import missing GPG keys
+      ansible.builtin.apt_key:
+        keyserver: keyserver.ubuntu.com
+        id: "{{ item }}"
+      loop: "{{ missing_keys }}"
+      when: missing_keys is defined and missing_keys | length > 0
+
+    - name: Re-run apt update after adding keys
+      ansible.builtin.apt:
+        update_cache: yes
+      when: missing_keys is defined and missing_keys | length > 0
+
+    - name: Check for available updates
       ansible.builtin.shell: |
-        apt update || (grep 'NO_PUBKEY' /var/log/apt/term.log | awk '{print $21}' | xargs -r -I '{}' apt-key adv --keyserver keyserver.ubuntu.com --recv-keys '{}')
-      register: apt_update_result
-      retries: 3
-      delay: 10
-      until: apt_update_result.rc == 0
+        LC_ALL=C apt list --upgradeable 2>/dev/null | grep -v "^Listing" | wc -l
+      register: update_count
       changed_when: false
 
     - name: Upgrade system
