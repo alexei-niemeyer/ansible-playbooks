@@ -55,7 +55,7 @@
     - name: Collect successfully imported keys
       set_fact:
         imported_keys: "{{ imported_keys | default([]) + [ item.item.0 ] }}"
-      when: item.rc == 0
+      when: not item.failed
       loop: "{{ import_results.results }}"
       loop_control:
         label: "{{ item.item.0 }} from {{ item.item.1 }}"
