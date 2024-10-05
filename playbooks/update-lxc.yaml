@@ -6,8 +6,6 @@
     ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
     keyservers:
       - keyserver.ubuntu.com
-      - pgp.mit.edu
-      - hkps.pool.sks-keyservers.net
 
   tasks:
     - name: Detect operating system
