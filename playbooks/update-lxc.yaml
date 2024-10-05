@@ -1,5 +1,6 @@
 ---
-- hosts: all
+- name: General Debian Update with Automatic GPG Key Management
+  hosts: all
   become: true
   vars:
     ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
@@ -10,103 +11,89 @@
 
   tasks:
     - name: Detect operating system
-      ansible.builtin.shell: |
-        if grep -qi ubuntu /etc/os-release; then
-          echo "Ubuntu detected."
-        elif grep -qi debian /etc/os-release; then
-          echo "Debian detected."
-        else
-          echo "Unsupported operating system. Exiting."
-          exit 1
-        fi
-      register: os_output
+      ansible.builtin.command: cat /etc/os-release
+      register: os_release
       changed_when: false
 
-    - name: Führe apt update aus und erfasse die Ausgabe
+    - name: Check if the operating system is supported
+      ansible.builtin.set_fact:
+        is_supported_os: "{{ os_release.stdout | regex_search('ID=(debian|ubuntu)', '\\1') }}"
+      when: os_release.stdout is defined
+
+    - name: Fail if the operating system is not supported
+      ansible.builtin.fail:
+        msg: "Unsupported operating system."
+      when: is_supported_os is not defined
+
+    - name: Run apt update and capture output
       ansible.builtin.shell: apt update
       register: apt_update
       ignore_errors: yes
 
-    - name: Extrahiere fehlende GPG-Schlüssel aus apt update
+    - name: Extract missing GPG keys from apt update
       set_fact:
         missing_keys: "{{ apt_update.stdout | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
       when: apt_update.stdout is defined
 
-    - name: Debug fehlende Schlüssel
+    - name: Debug missing keys
       ansible.builtin.debug:
         var: missing_keys
       when: missing_keys | length > 0
 
-    - name: Importiere fehlende GPG-Schlüssel von den Keyservern
-      block:
-        - name: Importiere GPG-Schlüssel von jedem Keyserver
-          ansible.builtin.apt_key:
-            keyserver: "{{ keyserver }}"
-            id: "{{ key }}"
-            state: present
-          loop: "{{ missing_keys }}"
-          loop_control:
-            loop_var: key
-          vars:
-            keyserver: "{{ item }}"
-          with_items: "{{ keyservers }}"
-          register: import_results
-          ignore_errors: yes
-          when: missing_keys | length > 0
-
-        - name: Sammle erfolgreich importierte Schlüssel
-          set_fact:
-            imported_keys: "{{ imported_keys | default([]) + [ item.item ] }}"
-          when: item.rc == 0
-          loop: "{{ import_results.results }}"
-          loop_control:
-            label: "{{ item.item }} from {{ item.item.keyserver }}"
-
-        - name: Debug importierte Schlüssel
-          ansible.builtin.debug:
-            var: imported_keys
-          when: imported_keys is defined
-
+    - name: Import missing GPG keys from keyservers
+      ansible.builtin.apt_key:
+        keyserver: "{{ item.1 }}"
+        id: "{{ item.0 }}"
+        state: present
+      loop: "{{ missing_keys | product(keyservers) | list }}"
+      loop_control:
+        label: "Import key {{ item.0 }} from {{ item.1 }}"
+      register: import_results
+      ignore_errors: yes
       when: missing_keys | length > 0
 
-    - name: Verifiziere importierte GPG-Schlüssel
-      ansible.builtin.command: apt-key list
-      register: apt_keys
-      changed_when: false
+    - name: Collect successfully imported keys
+      set_fact:
+        imported_keys: "{{ imported_keys | default([]) + [ item.item.0 ] }}"
+      when: item.rc == 0
+      loop: "{{ import_results.results }}"
+      loop_control:
+        label: "{{ item.item.0 }} from {{ item.item.1 }}"
 
-    - name: Debug importierte GPG-Schlüssel
+    - name: Debug imported keys
       ansible.builtin.debug:
-        var: apt_keys.stdout_lines
+        var: imported_keys
+      when: imported_keys is defined
 
-    - name: Aktualisiere den apt-Cache nach Schlüssel-Import
+    - name: Update the apt cache after importing keys
       ansible.builtin.apt:
         update_cache: yes
         cache_valid_time: 0
       when: imported_keys is defined and imported_keys | length > 0
 
-    - name: Re-führe apt update nach Schlüssel-Import aus
+    - name: Re-run apt update after importing keys
       ansible.builtin.shell: apt update
       register: second_apt_update
       when: imported_keys is defined and imported_keys | length > 0
       ignore_errors: yes
 
-    - name: Extrahiere verbleibende fehlende GPG-Schlüssel aus dem zweiten apt update
+    - name: Extract remaining missing GPG keys from the second apt update
       set_fact:
         new_missing_keys: "{{ second_apt_update.stdout | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
       when: second_apt_update.stdout is defined
 
-    - name: Fehler auslösen, wenn noch fehlende GPG-Schlüssel vorhanden sind
+    - name: Fail if there are still missing GPG keys after import
       ansible.builtin.fail:
         msg: "Still missing GPG keys after import: {{ new_missing_keys }}"
       when: new_missing_keys | length > 0
 
-    - name: Überprüfe verfügbare Updates
+    - name: Check for available updates
       ansible.builtin.shell: |
         LC_ALL=C apt list --upgradeable 2>/dev/null | grep -v "^Listing" | wc -l
       register: update_count
       changed_when: false
 
-    - name: Upgrade system
+    - name: Upgrade the system
       ansible.builtin.apt:
         upgrade: dist
         update_cache: yes
