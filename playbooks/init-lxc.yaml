@@ -3,20 +3,20 @@
   become: true
   vars:
     ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
+    user_name: "{{ lookup('env', 'TARGET_USER') }}"
+    user_ssh_key: "{{ lookup('env', 'SSH_PUBLIC_KEY') }}"
 
   tasks:
     - name: Detect operating system
-      ansible.builtin.shell: |
-        if grep -qi ubuntu /etc/os-release; then
-          echo "Ubuntu detected."
-        elif grep -qi debian /etc/os-release; then
-          echo "Debian detected."
-        else
-          echo "Unsupported operating system. Exiting."
-          exit 1
-        fi
-      register: os_output
+      ansible.builtin.command: grep -qi "debian\|ubuntu" /etc/os-release
+      register: os_check
       changed_when: false
+      failed_when: os_check.rc != 0
+
+    - name: Fail if unsupported operating system
+      ansible.builtin.fail:
+        msg: "Unsupported operating system. Only Debian and Ubuntu are supported."
+      when: os_check.rc != 0
 
     - name: Create a backup of sshd_config
       ansible.builtin.copy:
@@ -59,13 +59,6 @@
             path: /etc/ssh/sshd_config
             state: present
             line: 'AllowUsers {{ user_name }}'
-            create: yes
-
-        - name: Set RSAAuthentication to yes
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'RSAAuthentication yes'
             create: yes
 
         - name: Set DebianBanner to no
@@ -140,4 +133,3 @@
       ansible.builtin.service:
         name: ssh
         state: restarted
-...
