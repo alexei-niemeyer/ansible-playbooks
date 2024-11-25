@@ -4,96 +4,53 @@
   become: true
   vars:
     ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
-    keyservers:
-      - keyserver.ubuntu.com
 
   tasks:
     - name: Detect operating system
-      ansible.builtin.command: cat /etc/os-release
-      register: os_release
-      changed_when: false
-
-    - name: Check if the operating system is supported
-      ansible.builtin.set_fact:
-        is_supported_os: "{{ os_release.stdout | regex_search('ID=(debian|ubuntu)', '\\1') }}"
-      when: os_release.stdout is defined
-
-    - name: Fail if the operating system is not supported
-      ansible.builtin.fail:
-        msg: "Unsupported operating system."
-      when: is_supported_os is not defined
-
-    - name: Run apt update and capture output
-      ansible.builtin.shell: apt update
-      register: apt_update
-      ignore_errors: yes
-
-    - name: Extract missing GPG keys from apt update
-      set_fact:
-        missing_keys: "{{ apt_update.stdout | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
-      when: apt_update.stdout is defined
-
-    - name: Debug missing keys
-      ansible.builtin.debug:
-        var: missing_keys
-      when: missing_keys | length > 0
-
-    - name: Import missing GPG keys from keyservers
-      ansible.builtin.apt_key:
-        keyserver: "{{ item.1 }}"
-        id: "{{ item.0 }}"
-        state: present
-      loop: "{{ missing_keys | product(keyservers) | list }}"
-      loop_control:
-        label: "Import key {{ item.0 }} from {{ item.1 }}"
-      register: import_results
-      ignore_errors: yes
-      when: missing_keys | length > 0
-
-    - name: Collect successfully imported keys
-      set_fact:
-        imported_keys: "{{ imported_keys | default([]) + [ item.item.0 ] }}"
-      when: not item.failed
-      loop: "{{ import_results.results }}"
-      loop_control:
-        label: "{{ item.item.0 }} from {{ item.item.1 }}"
-
-    - name: Debug imported keys
-      ansible.builtin.debug:
-        var: imported_keys
-      when: imported_keys is defined
-
-    - name: Update the apt cache after importing keys
-      ansible.builtin.apt:
-        update_cache: yes
-        cache_valid_time: 0
-      when: imported_keys is defined and imported_keys | length > 0
-
-    - name: Re-run apt update after importing keys
-      ansible.builtin.shell: apt update
-      register: second_apt_update
-      when: imported_keys is defined and imported_keys | length > 0
-      ignore_errors: yes
-
-    - name: Extract remaining missing GPG keys from the second apt update
-      set_fact:
-        new_missing_keys: "{{ second_apt_update.stdout | regex_findall('NO_PUBKEY ([A-F0-9]{16})') }}"
-      when: second_apt_update.stdout is defined
-
-    - name: Fail if there are still missing GPG keys after import
-      ansible.builtin.fail:
-        msg: "Still missing GPG keys after import: {{ new_missing_keys }}"
-      when: (new_missing_keys | default([])) | length > 0
-
-    - name: Check for available updates
       ansible.builtin.shell: |
-        LC_ALL=C apt list --upgradeable 2>/dev/null | grep -v "^Listing" | wc -l
-      register: update_count
+        if grep -qi ubuntu /etc/os-release; then
+          echo "Ubuntu detected."
+          exit 0
+        elif grep -qi debian /etc/os-release; then
+          echo "Debian detected."
+          exit 0
+        else
+          echo "Unsupported OS"
+          exit 1
+        fi
+      register: os_check
       changed_when: false
+      failed_when: os_check.rc != 0
 
-    - name: Upgrade the system
+    - name: Run apt update and handle GPG errors
+      block:
+        - name: Update apt cache
+          ansible.builtin.apt:
+            update_cache: yes
+          register: apt_update
+          ignore_errors: yes
+
+        - name: Import missing GPG keys if needed
+          ansible.builtin.shell: |
+            MISSING_KEYS=$(echo "{{ apt_update.stderr }}" | grep -oP "NO_PUBKEY \K[A-F0-9]+")
+            if [ ! -z "$MISSING_KEYS" ]; then
+              for key in $MISSING_KEYS; do
+                apt-key adv --keyserver keyserver.ubuntu.com --recv-keys $key
+              done
+              exit 1
+            fi
+            exit 0
+          register: key_import
+          when: apt_update.failed is defined and apt_update.failed
+          changed_when: key_import.rc != 0
+
+        - name: Update apt cache again if keys were imported
+          ansible.builtin.apt:
+            update_cache: yes
+          when: key_import.changed is defined and key_import.changed
+
+    - name: Upgrade system packages
       ansible.builtin.apt:
         upgrade: dist
-        update_cache: yes
-      register: upgrade_result
-...
+        autoremove: yes
+        autoclean: yes
