@@ -22,32 +22,32 @@
       changed_when: false
       failed_when: os_check.rc != 0
 
-    - name: Run apt update and handle GPG errors
-      block:
-        - name: Update apt cache
-          ansible.builtin.apt:
-            update_cache: yes
-          register: apt_update
-          ignore_errors: yes
+- name: Run apt update and handle GPG errors
+  block:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+      register: apt_update
+      ignore_errors: yes
 
-        - name: Import missing GPG keys if needed
-          ansible.builtin.shell: |
-            MISSING_KEYS=$(echo "{{ apt_update.stderr }}" | grep -oP "NO_PUBKEY \K[A-F0-9]+")
-            if [ ! -z "$MISSING_KEYS" ]; then
-              for key in $MISSING_KEYS; do
-                apt-key adv --keyserver keyserver.ubuntu.com --recv-keys $key
-              done
-              exit 1
-            fi
-            exit 0
-          register: key_import
-          when: apt_update.failed is defined and apt_update.failed
-          changed_when: key_import.rc != 0
+    - name: Check for missing GPG keys
+      ansible.builtin.shell: |
+        MISSING_KEYS=$(grep -oP "NO_PUBKEY \K[A-F0-9]+" <<< "{{ apt_update.msg | default('') }}")
+        if [ ! -z "$MISSING_KEYS" ]; then
+          for key in $MISSING_KEYS; do
+            apt-key adv --keyserver keyserver.ubuntu.com --recv-keys $key
+          done
+          exit 1
+        fi
+        exit 0
+      register: key_import
+      changed_when: key_import.rc != 0
+      when: apt_update.failed is defined and apt_update.failed
 
-        - name: Update apt cache again if keys were imported
-          ansible.builtin.apt:
-            update_cache: yes
-          when: key_import.changed is defined and key_import.changed
+    - name: Update apt cache again if keys were imported
+      ansible.builtin.apt:
+        update_cache: yes
+      when: key_import.changed is defined and key_import.changed
 
     - name: Upgrade system packages
       ansible.builtin.apt:
