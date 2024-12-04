@@ -35,14 +35,23 @@
             var: apt_update
           when: apt_update.failed is defined
 
-        - name: Import missing GPG keys if needed
+        - name: Import missing or expired GPG keys if needed
           ansible.builtin.shell: |
             STDERR="{{ apt_update.stderr | default('') }}"
             if [ -n "$STDERR" ]; then
+              # Extract expired or missing keys
               MISSING_KEYS=$(echo "$STDERR" | grep -o "NO_PUBKEY [A-F0-9]*" | awk '{print $2}' || true)
-              if [ -n "$MISSING_KEYS" ]; then
-                for key in $MISSING_KEYS; do
-                  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys "$key" || true
+              EXPIRED_KEYS=$(echo "$STDERR" | grep -o "EXPKEYSIG [A-F0-9]*" | awk '{print $2}' || true)
+              
+              # Combine and deduplicate keys
+              ALL_KEYS=$(echo "$MISSING_KEYS $EXPIRED_KEYS" | tr ' ' '\n' | sort -u)
+              
+              if [ -n "$ALL_KEYS" ]; then
+                for key in $ALL_KEYS; do
+                  # Try multiple methods to import the key
+                  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys "$key" || \
+                  apt-key adv --keyserver hkps://keyserver.ubuntu.com --recv-keys "$key" || \
+                  apt-key adv --keyserver keys.gnupg.net --recv-keys "$key" || true
                 done
                 exit 1
               fi
