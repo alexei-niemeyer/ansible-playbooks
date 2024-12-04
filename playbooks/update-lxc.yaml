@@ -38,8 +38,9 @@
         - name: Import missing GPG keys if needed
           ansible.builtin.shell: |
             set -o pipefail
-            if [ -n "{{ apt_update.stderr | default('') }}" ]; then
-              MISSING_KEYS=$(echo "{{ apt_update.stderr }}" | grep -oP "NO_PUBKEY \K[A-F0-9]+" || true)
+            STDERR="{{ apt_update.stderr | default('') }}"
+            if [ -n "$STDERR" ]; then
+              MISSING_KEYS=$(echo "$STDERR" | grep -oP "NO_PUBKEY \K[A-F0-9]+" || true)
               if [ -n "$MISSING_KEYS" ]; then
                 for key in $MISSING_KEYS; do
                   apt-key adv --keyserver keyserver.ubuntu.com --recv-keys "$key" || true
@@ -49,7 +50,7 @@
             fi
             exit 0
           register: key_import
-          when: apt_update.failed is defined and apt_update.failed
+          when: apt_update.failed is defined
           changed_when: key_import.rc != 0
 
         - name: Update apt cache again if keys were imported
