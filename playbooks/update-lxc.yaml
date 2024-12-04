@@ -30,8 +30,14 @@
           register: apt_update
           ignore_errors: yes
 
+        - name: Debug apt update result
+          ansible.builtin.debug:
+            var: apt_update
+          when: apt_update.failed is defined
+
         - name: Import missing GPG keys if needed
           ansible.builtin.shell: |
+            set -o pipefail
             if [ -n "{{ apt_update.stderr | default('') }}" ]; then
               MISSING_KEYS=$(echo "{{ apt_update.stderr }}" | grep -oP "NO_PUBKEY \K[A-F0-9]+" || true)
               if [ -n "$MISSING_KEYS" ]; then
