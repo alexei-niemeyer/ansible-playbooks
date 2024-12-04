@@ -32,7 +32,9 @@
 
         - name: Debug apt update result
           ansible.builtin.debug:
-            var: apt_update
+            msg: 
+              - "Failed: {{ apt_update.failed | default('N/A') }}"
+              - "Error: {{ apt_update.msg | default('None') }}"
           when: apt_update.failed is defined
 
         - name: Import missing or expired GPG keys if needed
