@@ -1,19 +1,16 @@
 ---
-- name: General Debian Update with Automatic GPG Key Management
+- name: General Debian/Ubuntu Update with Automatic GPG Key Management
   hosts: all
   become: true
-  vars:
-    ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
+  gather_facts: false
 
   tasks:
     - name: Detect operating system
       ansible.builtin.shell: |
         if grep -qi ubuntu /etc/os-release; then
           echo "Ubuntu detected."
-          exit 0
         elif grep -qi debian /etc/os-release; then
           echo "Debian detected."
-          exit 0
         else
           echo "Unsupported OS"
           exit 1
@@ -22,7 +19,7 @@
       changed_when: false
       failed_when: os_check.rc != 0
 
-    - name: Run apt update and handle GPG errors
+    - name: Run apt update and handle GPG/repo errors
       block:
         - name: Update apt cache
           ansible.builtin.apt:
@@ -32,41 +29,43 @@
 
         - name: Debug apt update result
           ansible.builtin.debug:
-            msg: 
+            msg:
               - "Failed: {{ apt_update.failed | default('N/A') }}"
               - "Error: {{ apt_update.msg | default('None') }}"
-          when: apt_update.failed is defined
 
         - name: Import missing or expired GPG keys if needed
           ansible.builtin.shell: |
             STDERR="{{ apt_update.stderr | default('') }}"
             if [ -n "$STDERR" ]; then
-              # Extract expired or missing keys
               MISSING_KEYS=$(echo "$STDERR" | grep -o "NO_PUBKEY [A-F0-9]*" | awk '{print $2}' || true)
               EXPIRED_KEYS=$(echo "$STDERR" | grep -o "EXPKEYSIG [A-F0-9]*" | awk '{print $2}' || true)
-              
-              # Combine and deduplicate keys
               ALL_KEYS=$(echo "$MISSING_KEYS $EXPIRED_KEYS" | tr ' ' '\n' | sort -u)
-              
+
               if [ -n "$ALL_KEYS" ]; then
                 for key in $ALL_KEYS; do
-                  # Try multiple methods to import the key
-                  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys "$key" || \
-                  apt-key adv --keyserver hkps://keyserver.ubuntu.com --recv-keys "$key" || \
-                  apt-key adv --keyserver keys.gnupg.net --recv-keys "$key" || true
+                  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys "$key" || true
                 done
                 exit 1
               fi
             fi
             exit 0
           register: key_import
-          when: apt_update.failed is defined
           changed_when: key_import.rc != 0
+          when: apt_update is failed
 
-        - name: Update apt cache again if keys were imported
+        - name: Accept repository changes automatically
+          ansible.builtin.shell: |
+            apt-get -o DPkg::Options::=--force-confnew \
+                    -o DPkg::Options::=--force-confdef \
+                    --allow-releaseinfo-change update -y
+          register: repo_fix
+          changed_when: "'Get:' in repo_fix.stdout"
+          when: apt_update is failed
+
+        - name: Update apt cache again if keys or repo accepted
           ansible.builtin.apt:
             update_cache: yes
-          when: key_import.changed is defined and key_import.changed
+          when: key_import is changed or repo_fix is changed
 
     - name: Upgrade system packages
       ansible.builtin.apt:
