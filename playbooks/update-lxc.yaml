@@ -2,73 +2,92 @@
 - name: General Debian/Ubuntu Update with Automatic GPG Key Management
   hosts: all
   become: true
-  gather_facts: false
+  gather_facts: true
+  serial: 10
 
   tasks:
-    - name: Detect operating system
-      ansible.builtin.shell: |
-        if grep -qi ubuntu /etc/os-release; then
-          echo "Ubuntu detected."
-        elif grep -qi debian /etc/os-release; then
-          echo "Debian detected."
-        else
-          echo "Unsupported OS"
-          exit 1
-        fi
-      register: os_check
-      changed_when: false
-      failed_when: os_check.rc != 0
+    - name: Verify supported OS
+      ansible.builtin.fail:
+        msg: "Unsupported OS: {{ ansible_distribution }}. Only Debian/Ubuntu supported."
+      when: ansible_os_family != "Debian"
 
-    - name: Run apt update and handle GPG/repo errors
+    - name: Update apt cache
       block:
-        - name: Update apt cache
+        - name: Run apt update
           ansible.builtin.apt:
-            update_cache: yes
+            update_cache: true
           register: apt_update
-          ignore_errors: yes
 
-        - name: Debug apt update result
+      rescue:
+        - name: Show apt update error
           ansible.builtin.debug:
-            msg:
-              - "Failed: {{ apt_update.failed | default('N/A') }}"
-              - "Error: {{ apt_update.msg | default('None') }}"
+            msg: "apt update failed: {{ apt_update.msg | default('unknown error') }}"
 
-        - name: Import missing or expired GPG keys if needed
+        - name: Import missing or expired GPG keys
           ansible.builtin.shell: |
-            STDERR="{{ apt_update.stderr | default('') }}"
-            if [ -n "$STDERR" ]; then
-              MISSING_KEYS=$(echo "$STDERR" | grep -o "NO_PUBKEY [A-F0-9]*" | awk '{print $2}' || true)
-              EXPIRED_KEYS=$(echo "$STDERR" | grep -o "EXPKEYSIG [A-F0-9]*" | awk '{print $2}' || true)
-              ALL_KEYS=$(echo "$MISSING_KEYS $EXPIRED_KEYS" | tr ' ' '\n' | sort -u)
+            ERROR="{{ (apt_update.msg | default('')) + ' ' + (apt_update.stderr | default('')) }}"
+            KEYS=$(echo "$ERROR" | grep -oP "(NO_PUBKEY|EXPKEYSIG) \K[A-F0-9]+" | sort -u)
+            for key in $KEYS; do
+              gpg --keyserver keyserver.ubuntu.com --recv-keys "$key"
+              gpg --export "$key" | tee /etc/apt/trusted.gpg.d/${key}.gpg > /dev/null
+            done
+          when: >
+            'NO_PUBKEY' in (apt_update.msg | default('')) or
+            'EXPKEYSIG' in (apt_update.msg | default('')) or
+            'NO_PUBKEY' in (apt_update.stderr | default('')) or
+            'EXPKEYSIG' in (apt_update.stderr | default(''))
+          changed_when: true
 
-              if [ -n "$ALL_KEYS" ]; then
-                for key in $ALL_KEYS; do
-                  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys "$key" || true
-                done
-                exit 1
-              fi
-            fi
-            exit 0
-          register: key_import
-          changed_when: key_import.rc != 0
-          when: apt_update is failed
-
-        - name: Accept repository changes automatically
+        - name: Accept repository release info changes
           ansible.builtin.shell: |
             apt-get -o DPkg::Options::=--force-confnew \
                     -o DPkg::Options::=--force-confdef \
                     --allow-releaseinfo-change update -y
-          register: repo_fix
-          changed_when: "'Get:' in repo_fix.stdout"
-          when: apt_update is failed
+          when: >
+            'Release' in (apt_update.msg | default('')) or
+            'Release' in (apt_update.stderr | default(''))
+          changed_when: true
 
-        - name: Update apt cache again if keys or repo accepted
+        - name: Retry apt update after fixes
           ansible.builtin.apt:
-            update_cache: yes
-          when: key_import is changed or repo_fix is changed
+            update_cache: true
 
     - name: Upgrade system packages
       ansible.builtin.apt:
         upgrade: dist
-        autoremove: yes
-        autoclean: yes
+        autoremove: true
+        autoclean: true
+
+    - name: Check if reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Install 'at' for scheduled reboots
+      ansible.builtin.apt:
+        name: at
+        state: present
+      when:
+        - reboot_required.stat.exists
+        - ansible_virtualization_type != 'lxc'
+
+    - name: Schedule reboot at 04:00 (VMs only)
+      ansible.builtin.shell: echo "/sbin/shutdown -r now" | at 04:00
+      when:
+        - reboot_required.stat.exists
+        - ansible_virtualization_type != 'lxc'
+      changed_when: true
+
+    - name: Info - Reboot scheduled for 04:00
+      ansible.builtin.debug:
+        msg: "Reboot scheduled for 04:00 on {{ inventory_hostname }} ({{ ansible_virtualization_type }})"
+      when:
+        - reboot_required.stat.exists
+        - ansible_virtualization_type != 'lxc'
+
+    - name: Info - LXC reboot skipped
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} requires reboot after kernel update but is an LXC container - skipping"
+      when:
+        - reboot_required.stat.exists
+        - ansible_virtualization_type == 'lxc'
