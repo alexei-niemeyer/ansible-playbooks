@@ -23,12 +23,14 @@
   connection: local
   vars:
     # --- Input / Defaults ---
+    # "default(X, true)" greift auch bei leeren Strings (Semaphore v2.9 hat
+    # kein default_value-Support — leere Survey-Felder kommen als "").
     hostname:      "{{ hostname }}"
-    cores:         "{{ cores | default(2) }}"
-    memory:        "{{ memory | default(2048) }}"
-    disk:          "{{ disk | default(8) }}"
-    beschreibung:  "{{ beschreibung | default('') }}"
-    target_user:   "{{ target_user | default('alexei') }}"
+    cores:         "{{ cores | default(2, true) }}"
+    memory:        "{{ memory | default(2048, true) }}"
+    disk:          "{{ disk | default(8, true) }}"
+    beschreibung:  "{{ beschreibung | default('', true) }}"
+    target_user:   "{{ target_user | default('alexei', true) }}"
 
     # --- Infrastructure ---
     proxmox_api_host: "192.168.178.10"
