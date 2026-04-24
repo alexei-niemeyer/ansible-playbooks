@@ -1,0 +1,191 @@
+---
+# Deployt einen neuen Debian-13 LXC im Homelab.
+#
+# Flow:
+#   1. Holt nächste freie IP aus Netbox IP-Range (status=reserved, dns_name=hostname)
+#   2. Fragt Proxmox nach nächster freier VMID
+#   3. Erstellt LXC via Proxmox-API (unprivileged, zfs1, Netz statisch)
+#   4. Startet Container, wartet auf SSH
+#   5. Ruft init-lxc.yaml für Hardening auf (gegen den neuen Host)
+#   6. Patcht die Netbox-IP auf active + dokumentiert VMID/Node
+#
+# Benötigte Semaphore-Env (Secrets):
+#   PROXMOX_API_TOKEN_SECRET   UUID von ansible@pve!deploy
+#   NETBOX_TOKEN               Full token (nbt_<key>.<secret>)
+#   SSH_PUBLIC_KEY             Public Key für user "alexei"
+#
+# Benötigte extra-vars (Survey):
+#   hostname (required)    |   beschreibung, cores, memory, disk (optional)
+
+- name: Provision new Debian-13 LXC on proxmox
+  hosts: localhost
+  gather_facts: true
+  connection: local
+  vars:
+    # --- Input / Defaults ---
+    hostname:      "{{ hostname }}"
+    cores:         "{{ cores | default(2) }}"
+    memory:        "{{ memory | default(2048) }}"
+    disk:          "{{ disk | default(8) }}"
+    beschreibung:  "{{ beschreibung | default('') }}"
+    target_user:   "{{ target_user | default('alexei') }}"
+
+    # --- Infrastructure ---
+    proxmox_api_host: "192.168.178.10"
+    proxmox_node:     "proxmox"
+    proxmox_api_user: "ansible@pve!deploy"
+    proxmox_storage:  "zfs1"
+    proxmox_template: "local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst"
+    proxmox_bridge:   "vmbr0"
+    proxmox_gateway:  "192.168.178.1"
+    proxmox_cidr:     23
+
+    netbox_url:           "http://192.168.178.140:8080"
+    netbox_ip_range_id:   1
+
+    ssh_pubkey: "{{ lookup('env', 'SSH_PUBLIC_KEY') }}"
+    pve_token:  "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') }}"
+    nb_token:   "{{ lookup('env', 'NETBOX_TOKEN') }}"
+
+  tasks:
+    - name: Sanity check
+      ansible.builtin.assert:
+        that:
+          - hostname is defined and hostname | length > 0
+          - hostname is match('^[a-z0-9][a-z0-9-]{0,62}$')
+          - pve_token | length > 0
+          - nb_token | length > 0
+          - ssh_pubkey | length > 0
+        fail_msg: >-
+          hostname, PROXMOX_API_TOKEN_SECRET, NETBOX_TOKEN, SSH_PUBLIC_KEY müssen gesetzt sein.
+          hostname-Regex: ^[a-z0-9][a-z0-9-]{0,62}$
+
+    - name: Reservise nächste freie IP aus Netbox-Range
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-ranges/{{ netbox_ip_range_id }}/available-ips/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ nb_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          status: "reserved"
+          dns_name: "{{ hostname }}"
+          description: "Ansible deploy — provisioning {{ hostname }}"
+        status_code: [200, 201]
+      register: netbox_ip
+
+    - name: Set IP-Fakten
+      ansible.builtin.set_fact:
+        new_ip: "{{ netbox_ip.json.address.split('/')[0] }}"
+        netbox_ip_id: "{{ netbox_ip.json.id }}"
+
+    - name: Hole nächste freie Proxmox-VMID
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:8006/api2/json/cluster/nextid"
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+        validate_certs: false
+      register: pve_nextid
+
+    - name: Set VMID-Fakt
+      ansible.builtin.set_fact:
+        new_vmid: "{{ pve_nextid.json.data }}"
+
+    - name: Info
+      ansible.builtin.debug:
+        msg: >-
+          Deploying LXC {{ new_vmid }} "{{ hostname }}" with IP {{ new_ip }}/{{ proxmox_cidr }}
+          on node {{ proxmox_node }} (storage {{ proxmox_storage }}).
+
+    - name: Erstelle LXC via Proxmox-API
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/lxc"
+        method: POST
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+        body_format: form-urlencoded
+        body:
+          vmid: "{{ new_vmid }}"
+          hostname: "{{ hostname }}"
+          ostemplate: "{{ proxmox_template }}"
+          storage: "{{ proxmox_storage }}"
+          rootfs: "{{ proxmox_storage }}:{{ disk }}"
+          cores: "{{ cores }}"
+          memory: "{{ memory }}"
+          swap: 512
+          net0: "name=eth0,bridge={{ proxmox_bridge }},ip={{ new_ip }}/{{ proxmox_cidr }},gw={{ proxmox_gateway }}"
+          nameserver: "{{ proxmox_gateway }}"
+          unprivileged: 1
+          features: "nesting=1"
+          onboot: 1
+          start: 1
+          ssh-public-keys: "{{ ssh_pubkey }}"
+          description: >-
+            {{ hostname }}
+            {{ '\n' + beschreibung if beschreibung | length > 0 else '' }}
+            Deployed via Ansible (Semaphore) — {{ ansible_date_time.iso8601 }}
+        validate_certs: false
+        status_code: 200
+      register: pve_create
+
+    - name: Warte auf Abschluss des Create-Tasks
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/tasks/{{ pve_create.json.data }}/status"
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+        validate_certs: false
+      register: pve_task
+      until: pve_task.json.data.status == 'stopped'
+      retries: 90
+      delay: 2
+
+    - name: Task-Ergebnis prüfen
+      ansible.builtin.fail:
+        msg: "Proxmox-Task failed: {{ pve_task.json.data.exitstatus }}"
+      when: pve_task.json.data.exitstatus != 'OK'
+
+    - name: Warte auf SSH-Port am neuen LXC
+      ansible.builtin.wait_for:
+        host: "{{ new_ip }}"
+        port: 22
+        timeout: 180
+        delay: 5
+
+    - name: Patche Netbox-IP auf active + Metadaten
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/{{ netbox_ip_id }}/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ nb_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          status: "active"
+          dns_name: "{{ hostname }}"
+          description: "{{ hostname }} (LXC {{ new_vmid }} auf {{ proxmox_node }}){{ ' — ' + beschreibung if beschreibung | length > 0 else '' }}"
+          custom_fields:
+            proxmox_vmid: "{{ new_vmid | int }}"
+            proxmox_node: "{{ proxmox_node }}"
+        status_code: 200
+
+    - name: Füge neuen LXC zum In-Memory-Inventory hinzu
+      ansible.builtin.add_host:
+        name: "{{ hostname }}"
+        groups: newly_deployed
+        ansible_host: "{{ new_ip }}"
+        ansible_user: root
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/ansible_known_hosts_{{ new_vmid }}"
+
+    - name: Zusammenfassung
+      ansible.builtin.debug:
+        msg:
+          - "LXC {{ new_vmid }} ({{ hostname }}) erstellt auf {{ proxmox_node }}"
+          - "IP: {{ new_ip }}/{{ proxmox_cidr }} — in Netbox reserviert"
+          - "Starte jetzt Hardening über init-lxc.yaml …"
+
+
+- name: Run init hardening on the new LXC
+  import_playbook: init-lxc.yaml
+  vars:
+    target_hosts: newly_deployed

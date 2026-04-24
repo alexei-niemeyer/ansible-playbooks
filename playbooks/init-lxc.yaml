@@ -1,135 +1,193 @@
 ---
-- hosts: all
+# Initial hardening & baseline für frisch provisionierte Debian-LXCs.
+# Wird direkt nach deploy-lxc.yaml ausgeführt (Gruppe: newly_deployed)
+# oder standalone gegen beliebige Hosts (target_hosts=all).
+
+- name: Initial LXC hardening
+  hosts: "{{ target_hosts | default('all') }}"
   become: true
+  gather_facts: true
   vars:
-    ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
-    user_name: "{{ lookup('env', 'TARGET_USER') }}"
-    user_ssh_key: "{{ lookup('env', 'SSH_PUBLIC_KEY') }}"
+    target_user: "{{ lookup('env', 'TARGET_USER') | default('alexei', true) }}"
+    ssh_pubkey: "{{ lookup('env', 'SSH_PUBLIC_KEY') }}"
+    trusted_networks: "{{ lookup('env', 'TRUSTED_NETWORKS') | default('192.168.178.0/23', true) }}"
+
+  pre_tasks:
+    - name: Sanity check — required variables
+      ansible.builtin.assert:
+        that:
+          - ssh_pubkey | length > 0
+          - target_user | length > 0
+        fail_msg: "SSH_PUBLIC_KEY und TARGET_USER müssen gesetzt sein (Semaphore env)."
+
+    - name: Verify supported OS family
+      ansible.builtin.fail:
+        msg: "Nur Debian/Ubuntu supported (gefunden: {{ ansible_distribution }})."
+      when: ansible_os_family != "Debian"
 
   tasks:
-    - name: Detect operating system
-      ansible.builtin.command: grep -qi "debian\|ubuntu" /etc/os-release
-      register: os_check
-      changed_when: false
-      failed_when: os_check.rc != 0
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
 
-    - name: Fail if unsupported operating system
-      ansible.builtin.fail:
-        msg: "Unsupported operating system. Only Debian and Ubuntu are supported."
-      when: os_check.rc != 0
-
-    - name: Create a backup of sshd_config
-      ansible.builtin.copy:
-        src: /etc/ssh/sshd_config
-        dest: /etc/ssh/sshd_config.bak
-        remote_src: yes
-
-    - name: Edit SSH configuration
-      block:
-        - name: Set PermitRootLogin to no
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'PermitRootLogin no'
-            create: yes
-
-        - name: Set PubkeyAuthentication to yes
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'PubkeyAuthentication yes'
-            create: yes
-
-        - name: Set AuthorizedKeysFile
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'AuthorizedKeysFile .ssh/authorized_keys'
-            create: yes
-
-        - name: Set PasswordAuthentication to no
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'PasswordAuthentication no'
-            create: yes
-
-        - name: Set AllowUsers
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'AllowUsers {{ user_name }}'
-            create: yes
-
-        - name: Set DebianBanner to no
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'DebianBanner no'
-            create: yes
-
-        - name: Set MACs
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha2-256,hmac-sha2-512'
-            create: yes
-
-        - name: Set KexAlgorithms
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'KexAlgorithms diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group-exchange-sha256,curve25519-sha256,curve25519-sha256@libssh.org'
-            create: yes
-
-        - name: Set HostKeyAlgorithms
-          ansible.builtin.lineinfile:
-            path: /etc/ssh/sshd_config
-            state: present
-            line: 'HostKeyAlgorithms ssh-ed25519,rsa-sha2-256,rsa-sha2-512'
-            create: yes
-      notify: restart ssh
-
-    - name: Ensure necessary packages are installed
+    - name: Install baseline packages
       ansible.builtin.apt:
         name:
           - sudo
           - curl
+          - ca-certificates
+          - gnupg
+          - apt-transport-https
+          - software-properties-common
           - unattended-upgrades
           - rsyslog
           - fail2ban
-          - apt-transport-https
-          - ca-certificates
-          - software-properties-common
+          - python3
+          - python3-apt
         state: present
-        update_cache: yes
 
-    - name: Create user (from key store)
-      ansible.builtin.user:
-        name: "{{ user_name }}"
-        state: present
-        create_home: yes
-
-    - name: Configure sudo for the user
-      ansible.builtin.lineinfile:
-        path: /etc/sudoers
-        state: present
-        line: '{{ user_name }} ALL=(ALL) NOPASSWD:ALL'
-        validate: '/usr/sbin/visudo -cf %s'
-
-    - name: Deploy SSH key for the user
-      ansible.posix.authorized_key:
-        user: "{{ user_name }}"
-        state: present
-        key: "{{ user_ssh_key }}"
-
-    - name: Upgrade system
+    - name: Dist-upgrade
       ansible.builtin.apt:
         upgrade: dist
-        update_cache: yes
+        autoremove: true
+        autoclean: true
+
+    # --- User & sudo ---
+    - name: Create target user
+      ansible.builtin.user:
+        name: "{{ target_user }}"
+        state: present
+        shell: /bin/bash
+        create_home: true
+
+    - name: Passwordless sudo (drop-in)
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ target_user }}"
+        content: "{{ target_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
+
+    - name: Deploy authorized SSH key
+      ansible.posix.authorized_key:
+        user: "{{ target_user }}"
+        key: "{{ ssh_pubkey }}"
+        state: present
+
+    # --- SSH hardening: ed25519 only ---
+    - name: Ensure only ed25519 hostkey is active (comment out others)
+      ansible.builtin.replace:
+        path: /etc/ssh/sshd_config
+        regexp: '^(HostKey\s+/etc/ssh/ssh_host_(?:rsa|ecdsa|dsa)_key.*)$'
+        replace: '#\1'
+      notify: Restart sshd
+
+    - name: Remove non-ed25519 hostkey files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/ssh/ssh_host_rsa_key
+        - /etc/ssh/ssh_host_rsa_key.pub
+        - /etc/ssh/ssh_host_ecdsa_key
+        - /etc/ssh/ssh_host_ecdsa_key.pub
+        - /etc/ssh/ssh_host_dsa_key
+        - /etc/ssh/ssh_host_dsa_key.pub
+      notify: Restart sshd
+
+    - name: Generate ed25519 hostkey if missing
+      ansible.builtin.command:
+        cmd: ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N "" -q
+        creates: /etc/ssh/ssh_host_ed25519_key
+      notify: Restart sshd
+
+    - name: Deploy hardened sshd drop-in
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-hardening.conf
+        mode: "0644"
+        content: |
+          # Managed by Ansible (init-lxc.yaml) — ed25519-only hardening
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          PermitEmptyPasswords no
+          PubkeyAuthentication yes
+          AuthorizedKeysFile .ssh/authorized_keys
+
+          AllowUsers {{ target_user }}
+
+          # ed25519 only
+          HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
+          PubkeyAcceptedAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
+          CASignatureAlgorithms ssh-ed25519
+
+          # strong KEX / ciphers / MACs
+          KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,sntrup761x25519-sha512@openssh.com
+          Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+          MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+
+          DebianBanner no
+          LogLevel VERBOSE
+          MaxAuthTries 3
+          LoginGraceTime 30
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+      notify: Restart sshd
+
+    - name: Validate sshd config
+      ansible.builtin.command: sshd -t
+      changed_when: false
+
+    # --- fail2ban ---
+    - name: Configure fail2ban jail.local
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          [DEFAULT]
+          bantime  = 1h
+          findtime = 10m
+          maxretry = 5
+          backend  = systemd
+          ignoreip = 127.0.0.1/8 ::1 {{ trusted_networks }}
+
+          [sshd]
+          enabled = true
+          mode    = aggressive
+      notify: Restart fail2ban
+
+    - name: Enable & start fail2ban
+      ansible.builtin.systemd:
+        name: fail2ban
+        enabled: true
+        state: started
+
+    # --- unattended-upgrades ---
+    - name: Enable unattended-upgrades (debconf)
+      ansible.builtin.debconf:
+        name: unattended-upgrades
+        question: unattended-upgrades/enable_auto_updates
+        value: "true"
+        vtype: boolean
+
+    - name: Deploy 20auto-upgrades
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
 
   handlers:
-    - name: restart ssh
+    - name: Restart sshd
       ansible.builtin.service:
         name: ssh
+        state: restarted
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
         state: restarted
