@@ -1,0 +1,44 @@
+---
+# notify_gotify — Pushnachricht an Gotify-Server (192.168.178.106:8680)
+#
+# Required vars (typisch via Semaphore-Env `update-secrets`):
+#   gotify_url         z.B. http://192.168.178.106:8680
+#   gotify_app_token   Token der App "Semaphore Updates"
+#
+# Role vars (bei Aufruf setzen):
+#   title
+#   message
+#   priority           1-10 (Gotify-Skala; 5=normal, 8=high, 10=emergency)
+#   extras             (optional) dict mit zusätzlichen Metadaten
+
+- name: Gotify — assert credentials available
+  ansible.builtin.assert:
+    that:
+      - gotify_url is defined and gotify_url | length > 0
+      - gotify_app_token is defined and gotify_app_token | length > 0
+      - title is defined and title | length > 0
+      - message is defined and message | length > 0
+    fail_msg: "gotify_url, gotify_app_token, title, message sind Pflicht."
+
+- name: Gotify — send notification
+  ansible.builtin.uri:
+    url: "{{ gotify_url }}/message?token={{ gotify_app_token }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      title: "{{ title }}"
+      message: "{{ message }}"
+      priority: "{{ priority | default(5) | int }}"
+      extras: "{{ extras | default({}) }}"
+    status_code: 200
+    timeout: 10
+  register: gotify_result
+  failed_when: false   # Ein Notification-Fail darf keinen Update-Job abbrechen
+
+- name: Gotify — log delivery outcome
+  ansible.builtin.debug:
+    msg: >-
+      Gotify: {{ 'OK' if gotify_result.status == 200 else 'FAILED' }}
+      — {{ title }}

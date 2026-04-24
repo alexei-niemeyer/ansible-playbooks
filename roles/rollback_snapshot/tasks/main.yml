@@ -1,0 +1,61 @@
+---
+# rollback_snapshot — Rollback auf einen zuvor erstellten Snapshot.
+#
+# Wird typischerweise im Fehler-Pfad (nach failed health-check) aufgerufen.
+# Setzt voraus dass lxc_snapshot-Role vorher den Snapshot mit identischem
+# Label + vm_type erzeugt hat.
+#
+# Required vars (gleich wie lxc_snapshot):
+#   proxmox_api_host / proxmox_api_user / pve_token
+#   snap_vmid / snap_node / snap_label
+#   snap_vm_type       (wird von lxc_snapshot gesetzt; bei standalone-Rollback explizit mitgeben)
+
+- name: Rollback — sanity check
+  ansible.builtin.assert:
+    that:
+      - snap_vmid is defined
+      - snap_node is defined
+      - snap_label is defined
+      - snap_vm_type is defined and snap_vm_type in ['lxc', 'qemu']
+      - pve_token is defined and pve_token | length > 0
+
+- name: Rollback — execute
+  ansible.builtin.uri:
+    url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ snap_node }}/{{ snap_vm_type }}/{{ snap_vmid }}/snapshot/{{ snap_label }}/rollback"
+    method: POST
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+    validate_certs: false
+    status_code: 200
+  register: rollback_create
+
+- name: Rollback — wait for completion
+  ansible.builtin.uri:
+    url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ snap_node }}/tasks/{{ rollback_create.json.data }}/status"
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+    validate_certs: false
+  register: rollback_task
+  until: rollback_task.json.data.status == 'stopped'
+  retries: 180
+  delay: 2
+
+- name: Rollback — verify OK
+  ansible.builtin.fail:
+    msg: "Rollback auf {{ snap_label }} schlug fehl: {{ rollback_task.json.data.exitstatus }}"
+  when: rollback_task.json.data.exitstatus != 'OK'
+
+- name: Rollback — start container/VM (falls pct/qm rollback stopped)
+  ansible.builtin.uri:
+    url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ snap_node }}/{{ snap_vm_type }}/{{ snap_vmid }}/status/start"
+    method: POST
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+    validate_certs: false
+    status_code: [200, 500]   # 500 wenn bereits running
+  register: start_after_rollback
+  failed_when: false
+
+- name: Rollback — done
+  ansible.builtin.debug:
+    msg: "✓ Rollback auf {{ snap_label }} abgeschlossen ({{ snap_vm_type }} {{ snap_vmid }})"

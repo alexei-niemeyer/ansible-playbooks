@@ -1,0 +1,84 @@
+---
+# lxc_snapshot — erstellt einen Proxmox-Snapshot via Proxmox-API.
+#
+# Detected automatisch LXC (pct) vs VM (qm) anhand /nodes/<node>/{qemu,lxc}/<vmid>.
+#
+# Required vars:
+#   proxmox_api_host     192.168.178.10
+#   proxmox_api_user     ansible@pve!deploy
+#   pve_token            (aus ENV PROXMOX_API_TOKEN_SECRET)
+#
+# Role vars (pro Aufruf):
+#   snap_vmid            VMID (int oder string)
+#   snap_node            proxmox | proxmox2 | proxmox3
+#   snap_label           z.B. pre_immich_2026-04-24T12-00
+#   snap_description     (optional) Beschreibung des Snapshots
+
+- name: Snapshot — sanity check
+  ansible.builtin.assert:
+    that:
+      - snap_vmid is defined
+      - snap_node is defined and snap_node | length > 0
+      - snap_label is defined and snap_label | length > 0
+      - snap_label is match('^[a-zA-Z][a-zA-Z0-9_-]{0,39}$')
+      - pve_token is defined and pve_token | length > 0
+    fail_msg: "snap_vmid/node/label und pve_token müssen gesetzt sein. Label: ^[a-zA-Z][a-zA-Z0-9_-]{0,39}$"
+
+- name: Snapshot — detect LXC oder VM
+  ansible.builtin.uri:
+    url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ snap_node }}/{{ item }}/{{ snap_vmid }}/status/current"
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+    validate_certs: false
+    status_code: [200, 500]
+  register: pve_detect
+  loop:
+    - lxc
+    - qemu
+  loop_control:
+    label: "{{ item }}"
+
+- name: Snapshot — set vm_type fact
+  ansible.builtin.set_fact:
+    snap_vm_type: "{{ 'lxc' if pve_detect.results[0].status == 200 else 'qemu' }}"
+
+- name: Snapshot — info
+  ansible.builtin.debug:
+    msg: >-
+      {{ snap_vm_type | upper }} {{ snap_vmid }} on {{ snap_node }} →
+      Snapshot label "{{ snap_label }}"
+
+- name: Snapshot — create
+  ansible.builtin.uri:
+    url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ snap_node }}/{{ snap_vm_type }}/{{ snap_vmid }}/snapshot"
+    method: POST
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+    body_format: form-urlencoded
+    body:
+      snapname: "{{ snap_label }}"
+      description: "{{ snap_description | default('Ansible pre-update snapshot ' ~ ansible_date_time.iso8601) }}"
+      vmstate: "{{ 1 if snap_vm_type == 'qemu' else 0 }}"   # VMs: inkl. RAM-State
+    validate_certs: false
+    status_code: 200
+  register: snap_create
+
+- name: Snapshot — wait for task completion
+  ansible.builtin.uri:
+    url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ snap_node }}/tasks/{{ snap_create.json.data }}/status"
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_api_user }}={{ pve_token }}"
+    validate_certs: false
+  register: snap_task
+  until: snap_task.json.data.status == 'stopped'
+  retries: 120
+  delay: 2
+
+- name: Snapshot — verify OK
+  ansible.builtin.fail:
+    msg: "Snapshot {{ snap_label }} failed: {{ snap_task.json.data.exitstatus }}"
+  when: snap_task.json.data.exitstatus != 'OK'
+
+- name: Snapshot — done
+  ansible.builtin.debug:
+    msg: "✓ Snapshot {{ snap_label }} erstellt ({{ snap_vm_type }} {{ snap_vmid }})"

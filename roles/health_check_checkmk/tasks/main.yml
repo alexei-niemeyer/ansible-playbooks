@@ -1,0 +1,113 @@
+---
+# health_check_checkmk — zwei Modi:
+#
+#   mode: baseline   → nimmt Snapshot der aktuellen OK-Services als baseline fact
+#   mode: verify     → reschedules + poll, dann Diff gegen baseline
+#
+# Liefert bei verify-Mode den fact `health_degraded`
+# (Liste von Services die vorher OK waren, jetzt aber nicht mehr).
+#
+# Required vars:
+#   checkmk_url           http://192.168.178.9/monitoring
+#   checkmk_user          cmkadmin  (oder dedizierter automation-User)
+#   checkmk_secret        (aus ENV CHECKMK_SECRET)
+#
+# Role vars (pro Aufruf):
+#   checkmk_host          Hostname wie in CheckMK registriert
+#   mode                  baseline | verify
+#   poll_timeout_seconds  (default 180)
+
+- name: CheckMK — sanity
+  ansible.builtin.assert:
+    that:
+      - checkmk_url is defined and checkmk_url | length > 0
+      - checkmk_user is defined and checkmk_user | length > 0
+      - checkmk_secret is defined and checkmk_secret | length > 0
+      - checkmk_host is defined and checkmk_host | length > 0
+      - mode is defined and mode in ['baseline', 'verify']
+    fail_msg: "checkmk_url/user/secret/host + mode (baseline|verify) sind Pflicht."
+
+- name: CheckMK — fetch service states
+  ansible.builtin.uri:
+    url: "{{ checkmk_url }}/check_mk/api/1.0/domain-types/service/collections/all"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ checkmk_user }} {{ checkmk_secret }}"
+      Accept: "application/json"
+    body_format: json
+    body:
+      query: '{"op": "=", "left": "services.host_name", "right": "{{ checkmk_host }}"}'
+      columns: ["state", "description"]
+    timeout: 15
+    status_code: 200
+  register: cmk_services
+
+- name: CheckMK — extract services by state
+  ansible.builtin.set_fact:
+    _cmk_states: "{{ cmk_services.json.value | map(attribute='extensions') | list }}"
+
+- name: CheckMK — baseline mode → save OK-services
+  when: mode == 'baseline'
+  block:
+    - name: CheckMK — store baseline fact
+      ansible.builtin.set_fact:
+        cmk_baseline_ok: >-
+          {{ _cmk_states
+             | selectattr('state', 'equalto', 0)
+             | map(attribute='description') | list }}
+
+    - name: CheckMK — baseline summary
+      ansible.builtin.debug:
+        msg: >-
+          Baseline für {{ checkmk_host }}: {{ cmk_baseline_ok | length }} OK-Services gespeichert.
+
+- name: CheckMK — verify mode → reschedule + compare
+  when: mode == 'verify'
+  block:
+    - name: CheckMK — trigger reschedule for host
+      ansible.builtin.uri:
+        url: "{{ checkmk_url }}/check_mk/api/1.0/domain-types/acknowledge/actions/reschedule/invoke"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ checkmk_user }} {{ checkmk_secret }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          host_name: "{{ checkmk_host }}"
+        status_code: [200, 204, 404]   # 404 wenn Endpoint nicht vorhanden in Raw-Edition
+      register: cmk_reschedule
+      failed_when: false
+
+    - name: CheckMK — warte auf nächsten Check-Zyklus
+      ansible.builtin.pause:
+        seconds: "{{ poll_timeout_seconds | default(180) | int }}"
+
+    - name: CheckMK — neue States fetchen
+      ansible.builtin.uri:
+        url: "{{ checkmk_url }}/check_mk/api/1.0/domain-types/service/collections/all"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ checkmk_user }} {{ checkmk_secret }}"
+          Accept: "application/json"
+        body_format: json
+        body:
+          query: '{"op": "=", "left": "services.host_name", "right": "{{ checkmk_host }}"}'
+          columns: ["state", "description"]
+        timeout: 15
+        status_code: 200
+      register: cmk_after
+
+    - name: CheckMK — Diff gegen baseline berechnen
+      ansible.builtin.set_fact:
+        health_degraded: >-
+          {{ cmk_after.json.value
+             | map(attribute='extensions') | list
+             | selectattr('state', 'ne', 0)
+             | map(attribute='description') | list
+             | intersect(cmk_baseline_ok | default([])) }}
+
+    - name: CheckMK — Verify-Ergebnis
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'OK — keine Services degradiert' if health_degraded | length == 0
+             else 'FAIL — degraded: ' ~ (health_degraded | join(', ')) }}

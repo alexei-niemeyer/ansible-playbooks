@@ -1,0 +1,137 @@
+---
+# update-immich.yaml — Pilot-Template für den Service-Update-Flow.
+#
+# Schritte:
+#   1. CheckMK-Baseline (OK-Services vorher)
+#   2. Proxmox-Snapshot (pre_immich_<timestamp>)
+#   3. docker compose pull && up -d auf 192.168.178.99
+#   4. CheckMK verify (warten + diff)
+#   5. Bei fail → rollback + Gotify CRIT
+#      Bei OK   → optional Gotify INFO
+#
+# Alle Credentials kommen aus dem Semaphore-Env `update-secrets`:
+#   PROXMOX_API_TOKEN_SECRET
+#   CHECKMK_USER  (z.B. cmkadmin)
+#   CHECKMK_SECRET
+#   GOTIFY_TOKEN
+#
+# Surveyvariable:
+#   dry_run  (true/false, default false)  — überspringt tatsächliche Updates
+
+- name: Update Immich (LXC 104)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    target_service:     "immich"
+    target_host_cmk:    "immich"            # Hostname wie in CheckMK
+    target_vmid:        104
+    target_node:        "proxmox"
+    target_ssh:         "alexei@192.168.178.99"
+    compose_dir:        "/opt/docker/immich"
+    dry_run:            "{{ dry_run | default(false) | bool }}"
+
+    # Infrastructure
+    proxmox_api_host:   "192.168.178.10"
+    proxmox_api_user:   "ansible@pve!deploy"
+    pve_token:          "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') }}"
+
+    checkmk_url:        "http://192.168.178.9/monitoring"
+    checkmk_user:       "{{ lookup('env', 'CHECKMK_USER')   | default('cmkadmin', true) }}"
+    checkmk_secret:     "{{ lookup('env', 'CHECKMK_SECRET') }}"
+
+    gotify_url:         "http://192.168.178.106:8680"
+    gotify_app_token:   "{{ lookup('env', 'GOTIFY_TOKEN') }}"
+
+    snap_label:         "pre_{{ target_service }}_{{ ansible_date_time.iso8601_basic_short | regex_replace('[^0-9]', '') }}"
+
+  tasks:
+    # ── 1. Baseline ──────────────────────────────────────────────────────
+    - name: CheckMK baseline
+      ansible.builtin.include_role:
+        name: health_check_checkmk
+      vars:
+        checkmk_host: "{{ target_host_cmk }}"
+        mode: baseline
+
+    # ── 2. Snapshot ──────────────────────────────────────────────────────
+    - name: Proxmox Snapshot
+      ansible.builtin.include_role:
+        name: lxc_snapshot
+      vars:
+        snap_vmid: "{{ target_vmid }}"
+        snap_node: "{{ target_node }}"
+        snap_description: "Vor update-{{ target_service }} Lauf"
+
+    # ── 3. Update ausführen ─────────────────────────────────────────────
+    - name: Dry-run — skip actual update
+      ansible.builtin.debug:
+        msg: "DRY-RUN: würde jetzt docker compose pull/up in {{ compose_dir }} ausführen"
+      when: dry_run
+
+    - name: docker compose pull && up -d
+      when: not dry_run
+      ansible.builtin.shell: |
+        set -e
+        cd {{ compose_dir }}
+        docker compose pull
+        docker compose up -d --remove-orphans
+      delegate_to: "{{ target_ssh }}"
+      become: true
+      register: update_result
+      changed_when: "'Pull complete' in update_result.stdout or 'Recreated' in update_result.stdout"
+
+    # ── 4. CheckMK verify ────────────────────────────────────────────────
+    - name: Health check (verify)
+      when: not dry_run
+      ansible.builtin.include_role:
+        name: health_check_checkmk
+      vars:
+        checkmk_host: "{{ target_host_cmk }}"
+        mode: verify
+        poll_timeout_seconds: 180
+
+    # ── 5a. Rollback bei failures ────────────────────────────────────────
+    - name: Handle failure → rollback + alert
+      when:
+        - not dry_run
+        - health_degraded is defined
+        - health_degraded | length > 0
+      block:
+        - name: Rollback Snapshot
+          ansible.builtin.include_role:
+            name: rollback_snapshot
+          vars:
+            snap_vmid: "{{ target_vmid }}"
+            snap_node: "{{ target_node }}"
+
+        - name: Gotify CRIT
+          ansible.builtin.include_role:
+            name: notify_gotify
+          vars:
+            title: "⚠️ Update {{ target_service }} ROLLBACK"
+            message: |
+              Update schlug fehl, auto-rollback auf {{ snap_label }} ausgeführt.
+              Degraded services: {{ health_degraded | join(', ') }}
+              Host: {{ target_host_cmk }} (VMID {{ target_vmid }})
+            priority: 8
+
+        - name: Fail the playbook explicitly
+          ansible.builtin.fail:
+            msg: "Update failed + rollback ausgeführt. Siehe Gotify."
+
+    # ── 5b. Success path ─────────────────────────────────────────────────
+    - name: Gotify INFO on success
+      when:
+        - not dry_run
+        - health_degraded is defined
+        - health_degraded | length == 0
+      ansible.builtin.include_role:
+        name: notify_gotify
+      vars:
+        title: "✓ Update {{ target_service }} OK"
+        message: |
+          Update erfolgreich durchgelaufen.
+          Snapshot {{ snap_label }} behalten (Auto-Cleanup nach 14 Tagen).
+          Host: {{ target_host_cmk }}
+        priority: 3
