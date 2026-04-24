@@ -1,5 +1,6 @@
 ---
+# ansible.builtin ist kein Galaxy-Collection (Teil von Ansible-Core),
+# darf hier nicht stehen — sonst scheitert ansible-galaxy install.
 collections:
-  - name: ansible.builtin
   - name: ansible.posix
   - name: community.general
